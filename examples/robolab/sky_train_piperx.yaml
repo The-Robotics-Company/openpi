@@ -8,7 +8,9 @@ name: pi05-piperx
 
 resources:
   cloud: aws
-  accelerators: A100-80GB:1      # H100:1 also fine; full fine-tune needs >70 GB. Use :8 for batch 256 / FSDP.
+  # AWS has no single-GPU A100-80GB (p4de is 8x only). Single H100 = p5.4xlarge, us-west-2 only, ~$6.9/h;
+  # full fine-tune needs >70 GB. For the LoRA configs use L40S:1 (g6e.2xlarge, us-east-2). :8 for FSDP/batch 256.
+  accelerators: H100:1
   disk_size: 512
   use_spot: false
 
@@ -23,6 +25,8 @@ envs:
 file_mounts:
   # openpi-train with our RoboLab configs; norm stats live in assets/<CONFIG>/ inside the repo.
   ~/openpi-train: ~/git/openpi-train
+  # W&B login (api.wandb.ai entry); openpi calls wandb.init at train start.
+  ~/.netrc: ~/.netrc
 
 setup: |
   set -e
@@ -43,6 +47,6 @@ run: |
   set -e
   cd ~/openpi-train
   export PATH=$HOME/.local/bin:$PATH
-  XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py $CONFIG --exp-name=$EXP_NAME --overwrite
+  XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py $CONFIG --exp-name=$EXP_NAME --project-name=$WANDB_PROJECT --overwrite
   # Checkpoints: ~/openpi-train/checkpoints/$CONFIG/$EXP_NAME/<step>/ ; copy the final one to S3 before autostop.
   aws s3 sync checkpoints/$CONFIG/$EXP_NAME s3://robotics-data-exports/checkpoints/openpi/$CONFIG/$EXP_NAME

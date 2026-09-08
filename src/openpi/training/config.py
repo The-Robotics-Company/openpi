@@ -22,6 +22,7 @@ import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.policies.robolab_policy as robolab_policy
 import openpi.shared.download as _download
+import openpi.shared.nnx_utils as nnx_utils
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
 import openpi.training.misc.polaris_config as polaris_config
@@ -1041,6 +1042,31 @@ _CONFIGS = [
         save_interval=500,
         keep_period=500,
         num_workers=4,
+    ),
+    TrainConfig(
+        # Action-expert-only fine-tune: the whole PaliGemma VLM (SigLIP + Gemma 2B) stays frozen, only the 300M action
+        # expert (Gemma params suffixed _1) and the action/state/time projections train. Same 3k-step small-data schedule.
+        name="pi05_piperx_rubiks_expert",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=15),
+        data=LeRobotRoboLabDataConfig(
+            repo_id="trc/robolab_piperx",
+            n_arm_joints=6,
+            action_dim=7,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=200, peak_lr=2.5e-5, decay_steps=3_000, decay_lr=2.5e-6),
+        num_train_steps=3_000,
+        batch_size=32,
+        log_interval=25,
+        save_interval=500,
+        keep_period=500,
+        num_workers=4,
+        # Freeze: Gemma-2B params (".*llm.*" minus the action expert ".*llm.*_1.*") and the SigLIP tower (".*img.*").
+        freeze_filter=nnx.Any(
+            nnx.All(nnx_utils.PathRegex(".*llm.*"), nnx.Not(nnx_utils.PathRegex(".*llm.*_1.*"))),
+            nnx_utils.PathRegex(".*img.*"),
+        ),
     ),
     TrainConfig(
         # Same run for the 48 GB L40S: LoRA on both Gemma towers, batch 16, EMA off.

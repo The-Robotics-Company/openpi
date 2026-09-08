@@ -1,0 +1,6 @@
+.venv/
+.git/
+checkpoints/
+wandb/
+__pycache__/
+*.pyc
