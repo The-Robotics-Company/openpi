@@ -20,6 +20,7 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.robolab_policy as robolab_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -454,6 +455,57 @@ class LeRobotDROIDDataConfig(DataConfigFactory):
         )
         model_transforms = ModelTransformFactory()(model_config)
 
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotRoboLabDataConfig(DataConfigFactory):
+    """RoboLab (IsaacLab) recordings converted with examples/robolab/convert_robolab_to_lerobot.py.
+
+    LeRobot features written by the converter: exterior_image, wrist_image, joint_position (n_arm_joints),
+    gripper_position (1, 0 open .. 1 closed), actions (n_arm_joints + 1: absolute joint targets in rad + continuous gripper 0 open .. 1 closed;
+    binarised only at execution, like DROID),
+    task (instruction). 15 fps = RoboLab's 15 Hz control rate.
+    """
+
+    # 6 for Piper X, 7 for the DROID Franka.
+    n_arm_joints: int = 6
+    # n_arm_joints + 1.
+    action_dim: int = 7
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image": "exterior_image",
+                        "observation/wrist_image": "wrist_image",
+                        "observation/joint_position": "joint_position",
+                        "observation/gripper_position": "gripper_position",
+                        "actions": "actions",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+        data_transforms = _transforms.Group(
+            inputs=[robolab_policy.RoboLabInputs(model_type=model_config.model_type)],
+            outputs=[robolab_policy.RoboLabOutputs(action_dim=self.action_dim)],
+        )
+        # Train on joint deltas (arm joints only, gripper stays absolute) and convert back at inference,
+        # exactly like pi05_droid_jointpos. RoboLab's client expects absolute joint targets.
+        delta_action_mask = _transforms.make_bool_mask(self.n_arm_joints, -1)
+        data_transforms = data_transforms.push(
+            inputs=[_transforms.DeltaActions(delta_action_mask)],
+            outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+        )
+        model_transforms = ModelTransformFactory()(model_config)
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
             repack_transforms=repack_transform,
@@ -913,6 +965,130 @@ _CONFIGS = [
             ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_droid/params"),
+        num_train_steps=20_000,
+        batch_size=32,
+    ),
+    #
+    # RoboLab (IsaacLab) fine-tuning configs. Data: examples/robolab/convert_robolab_to_lerobot.py.
+    # Norm stats: `uv run scripts/compute_norm_stats.py --config-name <name>` (writes assets/<name>/<asset_id>/).
+    #
+    TrainConfig(
+        # Piper X (6 joints + gripper), full fine-tune from pi05_base. Needs an 80 GB GPU.
+        name="pi05_piperx",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,  # pi05 is trained with 32-dim padded actions
+            action_horizon=15,  # 1 s of actions at RoboLab's 15 Hz
+        ),
+        data=LeRobotRoboLabDataConfig(
+            repo_id="trc/robolab_piperx",  # <HF_LEROBOT_HOME>/trc/robolab_piperx, see examples/robolab/README.md
+            n_arm_joints=6,
+            action_dim=7,
+            base_config=DataConfig(prompt_from_task=True),
+            # No assets_dir/asset_id: norm stats are computed fresh for this dataset by compute_norm_stats and stored
+            # under assets/<config>/<repo_id>/ (Piper joint ranges differ from every pretraining robot).
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=20_000,
+        batch_size=32,
+        # Defaults kept: AdamW (0.9/0.95, clip 1.0), 1k warmup -> 2.5e-5 cosine -> 2.5e-6 @30k, EMA 0.99, nothing frozen.
+    ),
+    TrainConfig(
+        # Same recipe, LoRA on both Gemma towers so it fits a 48 GB L40S. EMA off, as in the other LoRA configs.
+        name="pi05_piperx_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=15,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotRoboLabDataConfig(
+            repo_id="trc/robolab_piperx",
+            n_arm_joints=6,
+            action_dim=7,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=20_000,
+        batch_size=16,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=15,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        # Recommended run for the current 10-episode / 1.4k-frame piperx_rubiks_cube_bowl set: full fine-tune from pi05_base
+        # with a short schedule (3k steps ~ 70 epochs at batch 32), warmup and cosine decay compressed to the run length,
+        # checkpoints every 500 steps so the best one can be picked by RoboLab rollouts rather than by loss.
+        name="pi05_piperx_rubiks",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=15),
+        data=LeRobotRoboLabDataConfig(
+            repo_id="trc/robolab_piperx",
+            n_arm_joints=6,
+            action_dim=7,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=200, peak_lr=2.5e-5, decay_steps=3_000, decay_lr=2.5e-6),
+        num_train_steps=3_000,
+        batch_size=32,
+        log_interval=25,
+        save_interval=500,
+        keep_period=500,
+        num_workers=4,
+    ),
+    TrainConfig(
+        # Same run for the 48 GB L40S: LoRA on both Gemma towers, batch 16, EMA off.
+        name="pi05_piperx_rubiks_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True, action_dim=32, action_horizon=15,
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotRoboLabDataConfig(
+            repo_id="trc/robolab_piperx",
+            n_arm_joints=6,
+            action_dim=7,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=200, peak_lr=2.5e-5, decay_steps=3_000, decay_lr=2.5e-6),
+        num_train_steps=3_000,
+        batch_size=16,
+        log_interval=25,
+        save_interval=500,
+        keep_period=500,
+        num_workers=4,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True, action_dim=32, action_horizon=15,
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        # DROID Franka in RoboLab (7 joints + gripper), e.g. self-distillation on successful pi05 rollouts.
+        # Starts from the RoboLab sim checkpoint and reuses its DROID norm stats (same robot, same action space).
+        name="pi05_robolab_franka",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=15,
+        ),
+        data=LeRobotRoboLabDataConfig(
+            repo_id="trc/robolab_franka",
+            n_arm_joints=7,
+            action_dim=8,
+            base_config=DataConfig(prompt_from_task=True),
+            assets=AssetsConfig(
+                assets_dir="gs://openpi-assets-simeval/pi05_droid_jointpos/assets",
+                asset_id="droid",
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets-simeval/pi05_droid_jointpos/params"),
         num_train_steps=20_000,
         batch_size=32,
     ),

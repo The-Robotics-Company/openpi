@@ -1,0 +1,48 @@
+# SkyPilot job: full pi05 fine-tune on RoboLab Piper X data (config pi05_piperx).
+# Launch from the submitter box:
+#   sky launch -c pi05-piperx examples/robolab/sky_train_piperx.yaml -i 15 --down --env EXP_NAME=piperx_v1
+# Always pass `-i 15 --down`: a plain stop still bills the AMI's 2 TB root volume.
+# Before launching: put the converted LeRobot v2.1 dataset under DATASET_SRC (EFS or S3) and set REPO_ID to match.
+
+name: pi05-piperx
+
+resources:
+  cloud: aws
+  accelerators: A100-80GB:1      # H100:1 also fine; full fine-tune needs >70 GB. Use :8 for batch 256 / FSDP.
+  disk_size: 512
+  use_spot: false
+
+envs:
+  EXP_NAME: piperx_v1
+  CONFIG: pi05_piperx
+  REPO_ID: trc/robolab_piperx
+  DATASET_SRC: s3://robotics-data-exports/datasets/lerobot_v21/trc/robolab_piperx   # or an EFS path if mounted
+  HF_LEROBOT_HOME: /home/ubuntu/lerobot_v21
+  WANDB_PROJECT: robolab-pi05-train
+
+file_mounts:
+  # openpi-train with our RoboLab configs; norm stats live in assets/<CONFIG>/ inside the repo.
+  ~/openpi-train: ~/git/openpi-train
+
+setup: |
+  set -e
+  cd ~/openpi-train
+  curl -LsSf https://astral.sh/uv/install.sh | sh; export PATH=$HOME/.local/bin:$PATH
+  GIT_LFS_SKIP_SMUDGE=1 uv sync
+  # Pre-warm the base checkpoint in the background while the dataset syncs (cold EBS reads are slow).
+  mkdir -p ~/.cache/openpi/openpi-assets/checkpoints
+  (uv run python -c "import openpi.shared.download as d; d.maybe_download('gs://openpi-assets/checkpoints/pi05_base/params')" &)
+  mkdir -p $HF_LEROBOT_HOME/$(dirname $REPO_ID)
+  case "$DATASET_SRC" in
+    s3://*) aws s3 sync "$DATASET_SRC" "$HF_LEROBOT_HOME/$REPO_ID" ;;
+    *)      rsync -a "$DATASET_SRC/" "$HF_LEROBOT_HOME/$REPO_ID/" ;;
+  esac
+  wait
+
+run: |
+  set -e
+  cd ~/openpi-train
+  export PATH=$HOME/.local/bin:$PATH
+  XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py $CONFIG --exp-name=$EXP_NAME --overwrite
+  # Checkpoints: ~/openpi-train/checkpoints/$CONFIG/$EXP_NAME/<step>/ ; copy the final one to S3 before autostop.
+  aws s3 sync checkpoints/$CONFIG/$EXP_NAME s3://robotics-data-exports/checkpoints/openpi/$CONFIG/$EXP_NAME
