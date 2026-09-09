@@ -20,7 +20,7 @@ Output features (fps 15, robot_type from --robot):
     task                               instruction string (-> prompt_from_task)
 
 Usage (from the openpi-train repo, uses the pinned LeRobot v2.1):
-    uv run examples/robolab/convert_robolab_to_lerobot.py --output-dir ~/git/RoboLab/output/<run> \
+    uv run examples/robolab/convert_robolab_to_lerobot.py --output-dir ~/git/trc-policy-lab/RoboLab/output/<run> \
         --repo-id trc/robolab_piperx --robot piperx [--only-success] [--tasks BananaInBowlTask ...]
 The dataset is written to $HF_LEROBOT_HOME/<repo_id> (default ~/.cache/huggingface/lerobot/<repo_id>).
 """

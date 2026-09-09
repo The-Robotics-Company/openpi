@@ -8,7 +8,7 @@ Everything here uses openpi's pinned LeRobot (v2.1); do not point it at v3.0 dat
 Run any RoboLab runner with image recording on so the HDF5 carries the exact policy observations:
 
 ```bash
-cd ~/git/RoboLab
+cd ~/git/trc-policy-lab/RoboLab
 uv run python policies/pi0_family/run.py --policy pi05 --headless --num-envs 10 \
     --record-image-data --output-folder-name <run> --task <Task ...>
 ```
@@ -20,12 +20,12 @@ sample alignment is shifted by one step.
 ## 2. Convert to LeRobot v2.1
 
 ```bash
-cd ~/git/openpi-train
+cd ~/git/trc-policy-lab/openpi
 uv run examples/robolab/convert_robolab_to_lerobot.py \
-    --output-dir ~/git/RoboLab/output/<run> --repo-id trc/robolab_piperx --robot piperx --only-success
+    --output-dir ~/git/trc-policy-lab/RoboLab/output/<run> --repo-id trc/robolab_piperx --robot piperx --only-success
 # Franka self-distillation from the pi05 eval run:
 uv run examples/robolab/convert_robolab_to_lerobot.py \
-    --output-dir ~/git/RoboLab/output/pi05_isaac51_all120_n10 --repo-id trc/robolab_franka --robot franka
+    --output-dir ~/git/trc-policy-lab/RoboLab/output/pi05_isaac51_all120_n10 --repo-id trc/robolab_franka --robot franka
 ```
 
 Writes `$HF_LEROBOT_HOME/<repo_id>` (default `~/.cache/huggingface/lerobot/`). Set `HF_LEROBOT_HOME=/mnt/efs/datasets/lerobot_v21`
