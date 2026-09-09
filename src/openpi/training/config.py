@@ -1162,6 +1162,31 @@ _CONFIGS = [
         ),
     ),
     TrainConfig(
+        # Longer arm of the fixed-pose expert-only run: 10k steps (~11.6 epochs over 27.7k frames).
+        # decay_steps tracks num_train_steps -- reusing the 5k schedule would leave steps 5k-10k at the LR
+        # floor (2.5e-6), which is what stalled progress in the earlier absolute-vs-delta runs.
+        name="pi05_piperx_fixedpose_expert_10k",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=15),
+        data=LeRobotRoboLabDataConfig(
+            repo_id="trc/robolab_piperx_fixedpose",
+            n_arm_joints=6,
+            action_dim=7,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=200, peak_lr=2.5e-5, decay_steps=10_000, decay_lr=2.5e-6),
+        num_train_steps=10_000,
+        batch_size=32,
+        log_interval=25,
+        save_interval=1_000,
+        keep_period=1_000,
+        num_workers=4,
+        freeze_filter=nnx.Any(
+            nnx.All(nnx_utils.PathRegex(".*llm.*"), nnx.Not(nnx_utils.PathRegex(".*llm.*_1.*"))),
+            nnx_utils.PathRegex(".*img.*"),
+        ),
+    ),
+    TrainConfig(
         # Same run for the 48 GB L40S: LoRA on both Gemma towers, batch 16, EMA off.
         name="pi05_piperx_rubiks_lora",
         model=pi0_config.Pi0Config(
