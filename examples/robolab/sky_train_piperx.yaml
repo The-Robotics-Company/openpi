@@ -8,9 +8,11 @@ name: pi05-piperx
 
 resources:
   cloud: aws
+  # NOTE: g6e.xlarge (32 GiB RAM) OOMs at the first orbax checkpoint save (~17 GB train_state staged through
+  # host memory). Use g6e.2xlarge (64 GiB) or larger for pi05 saves.
   # AWS has no single-GPU A100-80GB (p4de is 8x only). Single H100 = p5.4xlarge, us-west-2 only, ~$6.9/h;
   # full fine-tune needs >70 GB. For the LoRA configs use L40S:1 (g6e.2xlarge, us-east-2). :8 for FSDP/batch 256.
-  accelerators: H100:1
+  accelerators: L40S:1        # must stay consistent with any --instance-type override (g6e.* = L40S)
   disk_size: 512
   use_spot: false
 
@@ -21,6 +23,8 @@ envs:
   DATASET_SRC: s3://robotics-data-exports/datasets/lerobot_v21/trc/robolab_piperx   # or an EFS path if mounted
   HF_LEROBOT_HOME: /home/ubuntu/lerobot_v21
   WANDB_PROJECT: robolab-pi05-train
+  TRAIN_EXTRA_ARGS: ""          # e.g. "--num-train-steps 12 --save-interval 10" to prove the save path
+  MEM_FRACTION: "0.75"           # device fraction; 0.9 left no headroom for orbax's save-time d2h copies
   WANDB_API_KEY:                 # required: pass --env WANDB_API_KEY=... at launch (from ~/.netrc)
 
 file_mounts:
@@ -65,7 +69,7 @@ run: |
   ( while true; do aws s3 sync --quiet --exclude '*.partial*' checkpoints/$CONFIG/$EXP_NAME $CKPT_S3 2>/dev/null || true; sleep 120; done ) &
   SYNC_PID=$!
   trap 'kill $SYNC_PID 2>/dev/null || true' EXIT
-  XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py $CONFIG --exp-name=$EXP_NAME --project-name=$WANDB_PROJECT --overwrite
+  XLA_PYTHON_CLIENT_MEM_FRACTION=$MEM_FRACTION uv run scripts/train.py $CONFIG --exp-name=$EXP_NAME --project-name=$WANDB_PROJECT --overwrite $TRAIN_EXTRA_ARGS
   kill $SYNC_PID 2>/dev/null || true
   # Checkpoints: ~/openpi-train/checkpoints/$CONFIG/$EXP_NAME/<step>/ ; final sync + done marker.
   aws s3 sync checkpoints/$CONFIG/$EXP_NAME $CKPT_S3 && touch /tmp/done && aws s3 cp /tmp/done $CKPT_S3/TRAINING_DONE
