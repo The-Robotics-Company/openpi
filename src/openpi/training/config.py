@@ -693,6 +693,51 @@ _CONFIGS = [
             ),
         ),
     ),
+    TrainConfig(
+        # Joint-position variant served for RoboLab / Piper X sim eval (ported from xuningy/openpi).
+        name="pi05_droid_jointpos",
+        model=pi0_config.Pi0Config(action_horizon=15, pi05=True),
+        data=SimpleDataConfig(
+            assets=AssetsConfig(asset_id="droid"),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[droid_policy.DroidInputs(model_type=ModelType.PI05)],
+                outputs=[_transforms.AbsoluteActions(_transforms.make_bool_mask(7, -1)), droid_policy.DroidOutputs()],
+            ),
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+        ),
+    ),
+    TrainConfig(
+        # Joint-position variant served for RoboLab / Piper X sim eval (ported from xuningy/openpi).
+        name="pi0_droid_jointpos",
+        model=pi0_config.Pi0Config(action_horizon=10),
+        data=SimpleDataConfig(
+            assets=AssetsConfig(asset_id="droid"),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[droid_policy.DroidInputs(model_type=ModelType.PI0)],
+                outputs=[_transforms.AbsoluteActions(_transforms.make_bool_mask(7, -1)), droid_policy.DroidOutputs()],
+            ),
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+        ),
+    ),
+    TrainConfig(
+        # Joint-position variant served for RoboLab / Piper X sim eval (ported from xuningy/openpi).
+        name="pi0_fast_droid_jointpos",
+        model=pi0_fast.Pi0FASTConfig(action_dim=8, action_horizon=10),
+        data=SimpleDataConfig(
+            assets=AssetsConfig(asset_id="droid"),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[droid_policy.DroidInputs(model_type=ModelType.PI0_FAST)],
+                outputs=[_transforms.AbsoluteActions(_transforms.make_bool_mask(7, -1)), droid_policy.DroidOutputs()],
+            ),
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+        ),
+    ),
     #
     # Fine-tuning Libero configs.
     #
@@ -1063,6 +1108,54 @@ _CONFIGS = [
         keep_period=500,
         num_workers=4,
         # Freeze: Gemma-2B params (".*llm.*" minus the action expert ".*llm.*_1.*") and the SigLIP tower (".*img.*").
+        freeze_filter=nnx.Any(
+            nnx.All(nnx_utils.PathRegex(".*llm.*"), nnx.Not(nnx_utils.PathRegex(".*llm.*_1.*"))),
+            nnx_utils.PathRegex(".*img.*"),
+        ),
+    ),
+    TrainConfig(
+        # Expert-only, 5k steps with a checkpoint every 1k for rollout-based model selection (L40S-sized: ~430M trainable).
+        name="pi05_piperx_rubiks_expert_5k",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=15),
+        data=LeRobotRoboLabDataConfig(
+            repo_id="trc/robolab_piperx",
+            n_arm_joints=6,
+            action_dim=7,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=200, peak_lr=2.5e-5, decay_steps=5_000, decay_lr=2.5e-6),
+        num_train_steps=5_000,
+        batch_size=32,
+        log_interval=25,
+        save_interval=1_000,
+        keep_period=1_000,
+        num_workers=4,
+        freeze_filter=nnx.Any(
+            nnx.All(nnx_utils.PathRegex(".*llm.*"), nnx.Not(nnx_utils.PathRegex(".*llm.*_1.*"))),
+            nnx_utils.PathRegex(".*img.*"),
+        ),
+    ),
+    TrainConfig(
+        # fixedpose_varpath set (200 eps, ~27.7k frames after dropping the zero-action warm-up): action-expert-only
+        # fine-tune, 5k steps (~5.8 epochs at batch 32), checkpoint every 1k for interleaved RoboLab rollouts.
+        # Prompt = RoboLab RubiksCubeTask default instruction ("Put the cube in the bowl"), written into the dataset.
+        name="pi05_piperx_fixedpose_expert",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=15),
+        data=LeRobotRoboLabDataConfig(
+            repo_id="trc/robolab_piperx_fixedpose",
+            n_arm_joints=6,
+            action_dim=7,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=200, peak_lr=2.5e-5, decay_steps=5_000, decay_lr=2.5e-6),
+        num_train_steps=5_000,
+        batch_size=32,
+        log_interval=25,
+        save_interval=1_000,
+        keep_period=1_000,
+        num_workers=4,
         freeze_filter=nnx.Any(
             nnx.All(nnx_utils.PathRegex(".*llm.*"), nnx.Not(nnx_utils.PathRegex(".*llm.*_1.*"))),
             nnx_utils.PathRegex(".*img.*"),
