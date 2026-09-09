@@ -49,11 +49,23 @@ run: |
   set -e
   cd ~/openpi-train
   export PATH=$HOME/.local/bin:$PATH
+  command -v aws >/dev/null || uv tool install awscli >/dev/null
+  # Dataset must match CONFIG's repo_id; fetch if the setup step ran with a different REPO_ID (e.g. after `sky exec`).
+  if [ ! -f "$HF_LEROBOT_HOME/$REPO_ID/meta/info.json" ]; then
+    mkdir -p "$HF_LEROBOT_HOME/$(dirname $REPO_ID)"
+    case "$DATASET_SRC" in
+      s3://*) aws s3 sync --quiet "$DATASET_SRC" "$HF_LEROBOT_HOME/$REPO_ID" ;;
+      *)      rsync -a "$DATASET_SRC/" "$HF_LEROBOT_HOME/$REPO_ID/" ;;
+    esac
+  fi
+  test -f "$HF_LEROBOT_HOME/$REPO_ID/meta/info.json" || { echo "dataset $REPO_ID missing at $HF_LEROBOT_HOME"; exit 2; }
   # Push every saved checkpoint to S3 while training runs (the submitter box evaluates them as they land).
+  # The loop is killed on ANY exit (trap), so a crashed train.py cannot leave the job RUNNING and the cluster billing.
   CKPT_S3=s3://robotics-data-exports/checkpoints/openpi/$CONFIG/$EXP_NAME
   ( while true; do aws s3 sync --quiet --exclude '*.partial*' checkpoints/$CONFIG/$EXP_NAME $CKPT_S3 2>/dev/null || true; sleep 120; done ) &
   SYNC_PID=$!
+  trap 'kill $SYNC_PID 2>/dev/null || true' EXIT
   XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py $CONFIG --exp-name=$EXP_NAME --project-name=$WANDB_PROJECT --overwrite
   kill $SYNC_PID 2>/dev/null || true
-  # Checkpoints: ~/openpi-train/checkpoints/$CONFIG/$EXP_NAME/<step>/ ; copy the final one to S3 before autostop.
+  # Checkpoints: ~/openpi-train/checkpoints/$CONFIG/$EXP_NAME/<step>/ ; final sync + done marker.
   aws s3 sync checkpoints/$CONFIG/$EXP_NAME $CKPT_S3 && touch /tmp/done && aws s3 cp /tmp/done $CKPT_S3/TRAINING_DONE
