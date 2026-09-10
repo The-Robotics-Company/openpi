@@ -255,6 +255,10 @@ def main(config: _config.TrainConfig):
         dynamic_ncols=True,
     )
 
+    # The optimizer's schedule, so the actual learning rate is logged alongside the losses. Evaluated outside
+    # the jitted step (it is a pure function of the step index), so it costs nothing and cannot perturb training.
+    lr_at = config.lr_schedule.create()
+
     infos = []
     for step in pbar:
         with sharding.set_mesh(mesh):
@@ -263,7 +267,8 @@ def main(config: _config.TrainConfig):
         if step % config.log_interval == 0:
             stacked_infos = common_utils.stack_forest(infos)
             reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
-            info_str = ", ".join(f"{k}={v:.4f}" for k, v in reduced_info.items())
+            reduced_info["learning_rate"] = float(lr_at(step))
+            info_str = ", ".join(f"{k}={v:.4g}" for k, v in reduced_info.items())
             pbar.write(f"Step {step}: {info_str}")
             wandb.log(reduced_info, step=step)
             infos = []

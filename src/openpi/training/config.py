@@ -1187,6 +1187,72 @@ _CONFIGS = [
         ),
     ),
     TrainConfig(
+        # Control arm: openpi's stock training defaults, nothing hand-tuned. Everything the TrainConfig dataclass
+        # defaults to is left alone -- CosineDecaySchedule(warmup 1k, peak 2.5e-5, decay 30k, floor 2.5e-6),
+        # 30k steps, batch 32, EMA 0.99, log 100 / save 1000 / keep 5000, 2 workers. Only the data, the init
+        # weights and the action-expert-only freeze are ours, so this is comparable to the tuned arms.
+        name="pi05_piperx_fixedpose_expert_default",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=15),
+        data=LeRobotRoboLabDataConfig(
+            repo_id="trc/robolab_piperx_fixedpose",
+            n_arm_joints=6,
+            action_dim=7,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        freeze_filter=nnx.Any(
+            nnx.All(nnx_utils.PathRegex(".*llm.*"), nnx.Not(nnx_utils.PathRegex(".*llm.*_1.*"))),
+            nnx_utils.PathRegex(".*img.*"),
+        ),
+    ),
+    TrainConfig(
+        # Warmup ablation: stock 1k warmup instead of our 200, over a 10k run with the decay matched to it.
+        # Differs from pi05_piperx_fixedpose_expert_10k in warmup_steps alone (200 -> 1000).
+        name="pi05_piperx_fixedpose_expert_w1k10k",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=15),
+        data=LeRobotRoboLabDataConfig(
+            repo_id="trc/robolab_piperx_fixedpose",
+            n_arm_joints=6,
+            action_dim=7,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        freeze_filter=nnx.Any(
+            nnx.All(nnx_utils.PathRegex(".*llm.*"), nnx.Not(nnx_utils.PathRegex(".*llm.*_1.*"))),
+            nnx_utils.PathRegex(".*img.*"),
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=1_000, peak_lr=2.5e-5, decay_steps=10_000, decay_lr=2.5e-6),
+        num_train_steps=10_000,
+        batch_size=32,
+        log_interval=25,
+        save_interval=1_000,
+        keep_period=1_000,
+        num_workers=4,
+    ),
+    TrainConfig(
+        # FULL fine-tune (nothing frozen -- SigLIP + Gemma 2B + action expert, all 3.35B params) on the fixed-pose
+        # set. Identical to pi05_piperx_fixedpose_expert_w1k10k except for the absent freeze_filter, so the two
+        # isolate the freeze. Needs >70 GB (openpi README), so it cannot run on a 48 GB L40S at any batch size:
+        # fsdp_devices=8 shards the params across an 8xH100 box.
+        name="pi05_piperx_fixedpose_full_10k",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=15),
+        data=LeRobotRoboLabDataConfig(
+            repo_id="trc/robolab_piperx_fixedpose",
+            n_arm_joints=6,
+            action_dim=7,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=1_000, peak_lr=2.5e-5, decay_steps=10_000, decay_lr=2.5e-6),
+        num_train_steps=10_000,
+        batch_size=32,
+        fsdp_devices=8,
+        log_interval=25,
+        save_interval=1_000,
+        keep_period=1_000,
+        num_workers=4,
+    ),
+    TrainConfig(
         # Same run for the 48 GB L40S: LoRA on both Gemma towers, batch 16, EMA off.
         name="pi05_piperx_rubiks_lora",
         model=pi0_config.Pi0Config(
