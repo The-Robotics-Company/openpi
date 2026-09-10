@@ -1210,8 +1210,12 @@ _CONFIGS = [
             nnx.All(nnx_utils.PathRegex(".*llm.*"), nnx.Not(nnx_utils.PathRegex(".*llm.*_1.*"))),
             nnx_utils.PathRegex(".*img.*"),
         ),
-        # ema_decay left at the 0.99 default (as in changan's expert-only configs). This keeps a full
-        # shadow copy of params (train.py:113), so it costs memory -- set to None if we hit OOM.
+        # EMA OFF. At 0.99 (changan's expert-config default) train.py:113 keeps a full shadow copy
+        # of all 3.353B params, which OOM-killed the host at step 194/200: anon-rss 23.2 GB +
+        # shmem 4.3 GB = 27.5 GB of this box's 30 GB, no swap. The LoRA smoke with ema_decay=None
+        # completed the same 200 steps and wrote a checkpoint. Costs a modest final-quality bump;
+        # the openpi LoRA configs disable it for the same reason.
+        ema_decay=None,
     ),
     TrainConfig(
         # Recommended run for the current 10-episode / 1.4k-frame piperx_rubiks_cube_bowl set: full fine-tune from pi05_base
