@@ -1211,6 +1211,41 @@ _CONFIGS = [
         num_train_steps=20_000,
         batch_size=32,
     ),
+    TrainConfig(
+        # LoRA variant of pi05_robolab_franka, for the food_packing pick-and-place.
+        # The full config wants 80 GB; this fits the 46 GB L40S by LoRA-ing both Gemma
+        # towers and dropping EMA, exactly as pi05_piperx_rubiks_lora does for Piper X.
+        # Same init and norm stats as pi05_robolab_franka (the pi05_droid_jointpos sim
+        # checkpoint), so the zero-shot baseline and this fine-tune share an action space.
+        name="pi05_robolab_franka_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True, action_dim=32, action_horizon=15,
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotRoboLabDataConfig(
+            repo_id="trc/robolab_franka_foodpacking",
+            n_arm_joints=7,
+            action_dim=8,
+            base_config=DataConfig(prompt_from_task=True),
+            assets=AssetsConfig(
+                assets_dir="gs://openpi-assets-simeval/pi05_droid_jointpos/assets",
+                asset_id="droid",
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets-simeval/pi05_droid_jointpos/params"),
+        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=200, peak_lr=2.5e-5, decay_steps=3_000, decay_lr=2.5e-6),
+        num_train_steps=3_000,
+        batch_size=16,
+        log_interval=25,
+        save_interval=500,
+        keep_period=500,
+        num_workers=4,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True, action_dim=32, action_horizon=15,
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
     #
     # ALOHA Sim configs. This config is used to demonstrate how to train on a simple simulated environment.
     #
