@@ -66,10 +66,19 @@ run: |
   # Push every saved checkpoint to S3 while training runs (the submitter box evaluates them as they land).
   # The loop is killed on ANY exit (trap), so a crashed train.py cannot leave the job RUNNING and the cluster billing.
   CKPT_S3=s3://robotics-data-exports/checkpoints/openpi/$CONFIG/$EXP_NAME
+  # Spot-safe restart: if this experiment already has checkpoints on S3 (a previous instance was preempted),
+  # pull them back and resume instead of restarting from step 0. train_state/ is uploaded, so resume is valid.
+  TRAIN_FLAG=--overwrite
+  if aws s3 ls $CKPT_S3/ 2>/dev/null | grep -qE "PRE [0-9]+/"; then
+    mkdir -p checkpoints/$CONFIG/$EXP_NAME
+    aws s3 sync --quiet $CKPT_S3 checkpoints/$CONFIG/$EXP_NAME
+    TRAIN_FLAG=--resume
+    echo "resuming from checkpoints already on S3"
+  fi
   ( while true; do aws s3 sync --quiet --exclude '*.partial*' checkpoints/$CONFIG/$EXP_NAME $CKPT_S3 2>/dev/null || true; sleep 120; done ) &
   SYNC_PID=$!
   trap 'kill $SYNC_PID 2>/dev/null || true' EXIT
-  XLA_PYTHON_CLIENT_MEM_FRACTION=$MEM_FRACTION uv run scripts/train.py $CONFIG --exp-name=$EXP_NAME --project-name=$WANDB_PROJECT --overwrite $TRAIN_EXTRA_ARGS
+  XLA_PYTHON_CLIENT_MEM_FRACTION=$MEM_FRACTION uv run scripts/train.py $CONFIG --exp-name=$EXP_NAME --project-name=$WANDB_PROJECT $TRAIN_FLAG $TRAIN_EXTRA_ARGS
   kill $SYNC_PID 2>/dev/null || true
   # Checkpoints: ~/openpi-train/checkpoints/$CONFIG/$EXP_NAME/<step>/ ; final sync + done marker.
   aws s3 sync checkpoints/$CONFIG/$EXP_NAME $CKPT_S3 && touch /tmp/done && aws s3 cp /tmp/done $CKPT_S3/TRAINING_DONE
