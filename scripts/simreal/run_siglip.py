@@ -34,7 +34,7 @@ import numpy as np
 from flax import nnx
 
 from openpi.models import model as _model
-from paired_loader import PairedFrames
+from paired_loader import PairedFrames, paired_batches
 
 PI05_BASE = "/home/ubuntu/training/models/openpi-assets/checkpoints/pi05_base/params"
 REAL_META = "/home/ubuntu/training/data/teleop-data-hugo/piper_x_pick_cube_v1/meta/episodes.jsonl"
@@ -80,6 +80,7 @@ def main() -> None:
     ap.add_argument("--stride", type=int, default=1, help="process every Nth frame")
     ap.add_argument("--limit", type=int, default=None, help="stop after N frames")
     ap.add_argument("--batch-size", type=int, default=16)
+    ap.add_argument("--num-workers", type=int, default=8)
     ap.add_argument("--out", default="/home/ubuntu/training/analysis/simreal/passA")
     args = ap.parse_args()
 
@@ -98,14 +99,12 @@ def main() -> None:
     print(f"frames to process: {len(frames)} (stride {args.stride})", flush=True)
 
     rows, d_sr_all, d_rr_all = [], {c: [] for c in CAMERAS}, {c: [] for c in CAMERAS}
+    controls = [control_index(i, lengths, starts) for i in frames]
     t0 = time.time()
-    for start in range(0, len(frames), args.batch_size):
-        idx = frames[start : start + args.batch_size]
-        ctrl = [control_index(i, lengths, starts) for i in idx]
-
-        (r_obs, _), (s_obs, _) = pf.batch(idx)
-        (c_obs, _), _ = pf.batch(ctrl)
-
+    done = 0
+    for idx, (r_obs, _), (s_obs, _), (c_obs, _) in paired_batches(
+        pf, frames, controls, batch_size=args.batch_size, num_workers=args.num_workers
+    ):
         for cam in CAMERAS:
             r = encode(model, r_obs.images[cam])
             s = encode(model, s_obs.images[cam])
@@ -113,12 +112,13 @@ def main() -> None:
             d_sr_all[cam].append(cosine_distance(r, s))
             d_rr_all[cam].append(cosine_distance(r, c))
 
-        for i, j in zip(idx, ctrl, strict=True):
+        for i in idx:
             ep = int(np.searchsorted(starts, i, side="right") - 1)
-            rows.append((i, ep, int(i - starts[ep]), (i - starts[ep]) / max(lengths[ep] - 1, 1), j))
+            rows.append((i, ep, int(i - starts[ep]), (i - starts[ep]) / max(lengths[ep] - 1, 1),
+                         control_index(i, lengths, starts)))
 
-        done = start + len(idx)
-        if start % (args.batch_size * 10) == 0:
+        done += len(idx)
+        if done % (args.batch_size * 20) < args.batch_size:
             rate = done / (time.time() - t0)
             print(f"  {done}/{len(frames)}  {rate:.1f} frames/s  eta {(len(frames) - done) / rate / 60:.1f} min", flush=True)
 

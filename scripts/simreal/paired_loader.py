@@ -30,6 +30,7 @@ import os
 os.environ.setdefault("HF_LEROBOT_HOME", "/home/ubuntu/training/data")
 
 import numpy as np  # noqa: E402
+import torch.utils.data as _torch_data  # noqa: E402
 
 from openpi.models import model as _model  # noqa: E402
 from openpi.training import config as _config  # noqa: E402
@@ -117,3 +118,53 @@ def assert_aligned(pf: PairedFrames, indices, *, atol: float = 1e-4) -> float:
     if diff > atol:
         raise RuntimeError(f"real/sim frames are NOT aligned: absolute action max|diff| = {diff:.3e}")
     return diff
+
+
+class _Triplets(_torch_data.Dataset):
+    """(real, sim, real-control) for each requested frame, decoded in worker processes."""
+
+    def __init__(self, pf: "PairedFrames", frames, controls):
+        self.pf = pf
+        self.frames = list(frames)
+        self.controls = list(controls)
+
+    def __len__(self) -> int:
+        return len(self.frames)
+
+    def __getitem__(self, k):
+        i, j = self.frames[k], self.controls[k]
+        return self.pf.real_ds[i], self.pf.sim_ds[i], self.pf.real_ds[j]
+
+
+def _triplet_collate(batch):
+    return tuple(_data_loader._collate_fn([b[n] for b in batch]) for n in range(3))  # noqa: SLF001
+
+
+def paired_batches(pf: "PairedFrames", frames, controls, *, batch_size=16, num_workers=8):
+    """Yield (indices, real, sim, control) batches.
+
+    Video decoding, not the GPU, is the bottleneck for this analysis: a single-process
+    loop ran at 1.1 frames/s with the GPU idle at 0%. Decoding in worker processes is
+    what makes a full-set pass practical.
+    """
+    ds = _Triplets(pf, frames, controls)
+    loader = _torch_data.DataLoader(
+        ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        collate_fn=_triplet_collate,
+        persistent_workers=num_workers > 0,
+        prefetch_factor=4 if num_workers > 0 else None,
+    )
+    start = 0
+    for r, s, c in loader:
+        n = len(r["actions"])
+        idx = ds.frames[start : start + n]
+        start += n
+        yield (
+            idx,
+            (_model.Observation.from_dict(r), r["actions"]),
+            (_model.Observation.from_dict(s), s["actions"]),
+            (_model.Observation.from_dict(c), c["actions"]),
+        )
