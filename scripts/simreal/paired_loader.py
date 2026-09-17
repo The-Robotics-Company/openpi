@@ -123,25 +123,29 @@ def assert_aligned(pf: PairedFrames, indices, *, atol: float = 1e-4) -> float:
 class _Triplets(_torch_data.Dataset):
     """(real, sim, real-control) for each requested frame, decoded in worker processes."""
 
-    def __init__(self, pf: "PairedFrames", frames, controls):
+    def __init__(self, pf: "PairedFrames", frames, controls=None):
         self.pf = pf
         self.frames = list(frames)
-        self.controls = list(controls)
+        self.controls = list(controls) if controls is not None else None
 
     def __len__(self) -> int:
         return len(self.frames)
 
     def __getitem__(self, k):
-        i, j = self.frames[k], self.controls[k]
-        return self.pf.real_ds[i], self.pf.sim_ds[i], self.pf.real_ds[j]
+        i = self.frames[k]
+        items = [self.pf.real_ds[i], self.pf.sim_ds[i]]
+        if self.controls is not None:
+            items.append(self.pf.real_ds[self.controls[k]])
+        return tuple(items)
 
 
 def _triplet_collate(batch):
-    return tuple(_data_loader._collate_fn([b[n] for b in batch]) for n in range(3))  # noqa: SLF001
+    n = len(batch[0])
+    return tuple(_data_loader._collate_fn([b[k] for b in batch]) for k in range(n))  # noqa: SLF001
 
 
-def paired_batches(pf: "PairedFrames", frames, controls, *, batch_size=16, num_workers=8):
-    """Yield (indices, real, sim, control) batches.
+def paired_batches(pf: "PairedFrames", frames, controls=None, *, batch_size=16, num_workers=8):
+    """Yield (indices, real, sim, control) batches; control is None when not requested.
 
     Video decoding, not the GPU, is the bottleneck for this analysis: a single-process
     loop ran at 1.1 frames/s with the GPU idle at 0%. Decoding in worker processes is
@@ -158,13 +162,17 @@ def paired_batches(pf: "PairedFrames", frames, controls, *, batch_size=16, num_w
         prefetch_factor=4 if num_workers > 0 else None,
     )
     start = 0
-    for r, s, c in loader:
+    for parts in loader:
+        r, s = parts[0], parts[1]
         n = len(r["actions"])
         idx = ds.frames[start : start + n]
         start += n
+        ctrl = None
+        if len(parts) > 2:
+            ctrl = (_model.Observation.from_dict(parts[2]), parts[2]["actions"])
         yield (
             idx,
             (_model.Observation.from_dict(r), r["actions"]),
             (_model.Observation.from_dict(s), s["actions"]),
-            (_model.Observation.from_dict(c), c["actions"]),
+            ctrl,
         )

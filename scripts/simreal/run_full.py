@@ -30,6 +30,7 @@ import argparse
 import dataclasses
 import pathlib
 import sys
+import time as time_mod
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
@@ -41,7 +42,7 @@ from flax import nnx
 
 from openpi.models import model as _model
 from openpi.models.pi0 import make_attn_mask
-from paired_loader import PairedFrames, denormalize
+from paired_loader import PairedFrames, denormalize, paired_batches
 
 PI05_BASE = "/home/ubuntu/training/models/openpi-assets/checkpoints/pi05_base/params"
 SEED = 0
@@ -114,6 +115,7 @@ def main() -> None:
     ap.add_argument("--stride", type=int, default=1)
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--batch-size", type=int, default=8)
+    ap.add_argument("--num-workers", type=int, default=8)
     ap.add_argument("--params", default=PI05_BASE)
     ap.add_argument("--tag", default="base")
     ap.add_argument("--ablations", action="store_true", help="also run the channel-swap ablations")
@@ -135,9 +137,11 @@ def main() -> None:
     print(f"frames: {len(frames)}", flush=True)
 
     records = []
-    for start in range(0, len(frames), args.batch_size):
-        idx = frames[start : start + args.batch_size]
-        (r_obs, r_act), (s_obs, s_act) = pf.batch(idx)
+    t0 = time_mod.time()
+    done = 0
+    for idx, (r_obs, r_act), (s_obs, s_act), _ in paired_batches(
+        pf, frames, batch_size=args.batch_size, num_workers=args.num_workers
+    ):
         noise, time = frame_rngs(idx, np.asarray(r_act).shape[1:])
 
         # --- label_fixed: both branches regress the REAL target ---
@@ -206,8 +210,11 @@ def main() -> None:
                 ).mean(-1)
 
         records.append(pd.DataFrame(row))
-        if start % (args.batch_size * 20) == 0:
-            print(f"  {start + len(idx)}/{len(frames)}", flush=True)
+        done += len(idx)
+        if done % (args.batch_size * 10) < args.batch_size:
+            rate = done / (time_mod.time() - t0)
+            print(f"  {done}/{len(frames)}  {rate:.2f} frames/s  "
+                  f"eta {(len(frames) - done) / rate / 60:.1f} min", flush=True)
 
     df = pd.concat(records, ignore_index=True)
     path = out / f"passB_{args.tag}_stride{args.stride}.parquet"
