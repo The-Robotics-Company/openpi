@@ -94,6 +94,11 @@ def main() -> None:
             print(f"  {c.replace('loss_', ''):24s} gap {gap:+.5f}   ({100 * gap / base:5.1f}% of it remains)")
         print("\n  A row near 0% means swapping that channel back to real removes the gap,")
         print("  i.e. that channel was carrying it.")
+        print("\n  Caveat: a channel swap builds an observation that exists in NEITHER domain")
+        print("  (real external camera beside a sim wrist view, say). The loss is not")
+        print("  guaranteed to fall monotonically toward loss_real, because a hybrid can be")
+        print("  further out of distribution than either consistent domain. ||dv|| is the")
+        print("  safer column to read for attribution.")
 
 
 if __name__ == "__main__":
