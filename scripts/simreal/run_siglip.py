@@ -14,7 +14,9 @@ the domains are *relative to* how far apart two real frames of the same moment
 already are. A ratio near 1 means the sim is within the spread of real data at
 that patch; much greater than 1 means the domains genuinely separate there.
 
-Output is small (196 floats per patch map), so this runs over the full set.
+PaliGemma uses SigLIP So400m/14, so 224px gives a 16x16 grid = 256 patches per
+camera (not the 14x14/patch-16 the siglip.py default suggests -- the variant
+string overrides it). That is 256 floats per map, small enough to run the full set.
 """
 
 from __future__ import annotations
@@ -38,6 +40,8 @@ PI05_BASE = "/home/ubuntu/training/models/openpi-assets/checkpoints/pi05_base/pa
 REAL_META = "/home/ubuntu/training/data/teleop-data-hugo/piper_x_pick_cube_v1/meta/episodes.jsonl"
 # right_wrist_0_rgb is an unused padding slot for this robot (all -1, masked off).
 CAMERAS = ("base_0_rgb", "left_wrist_0_rgb")
+# 224 / 14 = 16 patches per side. Verified empirically: the tower returns 256 tokens.
+GRID = 16
 
 
 def episode_index():

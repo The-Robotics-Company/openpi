@@ -48,11 +48,16 @@ SEED = 0
 CAMERAS = ("base_0_rgb", "left_wrist_0_rgb")
 
 
-def frame_rngs(indices, action_shape):
-    """Noise and timestep derived from the frame index -- identical across branches."""
+def frame_rngs(indices, action_shape, *, offset=0):
+    """Noise and timestep derived from the frame index -- identical across branches.
+
+    `offset` shifts the seed, which is how the noise-floor control is produced: the
+    same observation sampled from different initial noise. Any real-vs-sim delta
+    smaller than that floor is below the model's own sampling variability.
+    """
     noise, time = [], []
     for i in indices:
-        k = jax.random.key(SEED + int(i))
+        k = jax.random.key(SEED + offset * 1_000_003 + int(i))
         k_n, k_t = jax.random.split(k)
         noise.append(jax.random.normal(k_n, action_shape))
         time.append(jax.random.beta(k_t, 1.5, 1) * 0.999 + 0.001)
@@ -144,6 +149,13 @@ def main() -> None:
         a_s = denormalize(sample(model, s_obs, samp_noise), a_stats, use_quantiles=pf.use_quantile_norm)
         d_act = np.abs(a_r - a_s)
 
+        # Noise floor: the SAME real observation, different initial noise. This is the
+        # yardstick every other delta has to beat to mean anything.
+        noise2, _ = frame_rngs(idx, np.asarray(r_act).shape[1:], offset=1)
+        a_r2 = denormalize(sample(model, r_obs, noise2[..., : pf.train_cfg.model.action_dim]),
+                           a_stats, use_quantiles=pf.use_quantile_norm)
+        d_floor = np.abs(a_r - a_r2)
+
         dv = np.linalg.norm(np.asarray(v_r, np.float32) - np.asarray(v_s, np.float32), axis=-1)
 
         row = {
@@ -157,6 +169,8 @@ def main() -> None:
             "dact_arm_mean_rad": d_act[..., :6].mean((1, 2)),
             "dact_arm_max_rad": d_act[..., :6].max((1, 2)),
             "dact_grip_mean_m": d_act[..., 6].mean(-1),
+            "floor_arm_mean_rad": d_floor[..., :6].mean((1, 2)),
+            "floor_grip_mean_m": d_floor[..., 6].mean(-1),
         }
 
         if args.ablations:
