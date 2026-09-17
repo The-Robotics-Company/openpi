@@ -1385,6 +1385,97 @@ _CONFIGS = [
         # the openpi LoRA configs disable it for the same reason.
         ema_decay=None,
     ),
+
+    TrainConfig(
+        # SIM counterpart of pi05_piperx_teleop_expert_lora, i.e. pi05_piperx_sim_expert PLUS LoRA
+        # adapters on Gemma-2B. SigLIP still frozen, action expert still trained in full. Completes
+        # the 2x2: {expert-only, +Gemma LoRA} x {real, sim} on the same 49 trajectories.
+        #
+        # Data is sim-data-1 (see pi05_piperx_sim_expert for the full real-vs-sim characterisation:
+        # bit-identical actions, 0.018-0.043 rad state deltas, 35-40% wider delta spread, gripper
+        # true-jaw-gap, images at PSNR 10.4-13.9 dB). gripper_open_value stays 0.07.
+        #   trainable 458.0M of 3.381B (13.54%) = 427.93M action expert + 27.87M LoRA + 2.17M proj
+        #   vs ft01's 430.1M (12.83%).
+        # Rationale: Gemma-2B is the backbone fusing vision tokens, text and state into what the
+        # action expert reads, so adapting it can help even though the prompt is constant.
+        # Caveat: pi0.5's headline feature is knowledge insulation (training actions WITHOUT
+        # disturbing the VLM); this deliberately relaxes that, so watch for brittleness on cube
+        # positions outside the training distribution rather than for worse loss.
+        # NOTE: LoRA forces a backward pass through Gemma-2B that the expert-only config skips
+        # entirely -- slower per step, and Gemma activations must now be retained (new OOM risk).
+        #
+        # Dataset is read in place from HF_LEROBOT_HOME/<repo_id>; set
+        #   HF_LEROBOT_HOME=/home/ubuntu/training/data
+        # so repo_id resolves to .../data/teleop-data-hugo/piper_x_pick_cube_v1.
+        #
+        # Measured on this box (200-step smoke, LoRA at batch 16 / horizon 30):
+        #   2.1 s/it steady state (4.5 s/it during warmup), GPU util median 100% / mean 82.8%.
+        #   Checkpoints are ~8.9 GB each and take ~19 s to write.
+        # Expert-only removes backward work through the frozen towers, so steps get FASTER and the
+        # dataloader has less slack -- re-check GPU utilisation before trusting the 2.1 s/it figure.
+        #
+        # Still untuned for this data: action_horizon=30 (1 s at 30 Hz; RoboLab used 15 for 1 s at
+        # 15 Hz) and the LR schedule, which is inherited from the sim configs.
+        name="pi05_piperx_sim_expert_lora",
+        # Absolute paths, tied to the g6e.xlarge training box (see the HF_LEROBOT_HOME note above).
+        # compute_norm_stats.py has no path-override flag, so assets_base_dir has to live here rather
+        # than being passed at launch. Change both if this config ever moves to another machine or
+        # gets merged into the shared `trc` branch.
+        assets_base_dir="/home/ubuntu/training/assets",
+        checkpoint_base_dir="/home/ubuntu/training/runs",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=30,
+            # LoRA on Gemma-2B only. The action expert variant is left plain so it trains fully,
+            # and no lora is added to the SigLIP tower.
+            paligemma_variant="gemma_2b_lora",
+        ),
+        data=LeRobotPiperXTeleopDataConfig(
+            repo_id="sim-data-1/piper_x_pick_cube_v1",
+            n_arm_joints=6,
+            action_dim=7,
+            gripper_open_value=0.07,
+            base_config=DataConfig(prompt_from_task=True),
+            # No assets_dir/asset_id: Piper X is not in the pretraining mixture, so norm stats are
+            # computed fresh by compute_norm_stats into assets/<config>/<repo_id>/.
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        # changan's expert configs rescaled to 10k steps: 400 warmup keeps his 4% warmup fraction
+        # (200/5k), rather than inheriting his absolute 200 and ending up at 2%. Peak/floor unchanged.
+        # Cosine anneal kept (both changan's configs and the openpi default anneal); this means the
+        # 2k/4k/6k checkpoints sit at different points on the LR curve and are NOT directly
+        # comparable to 10k -- read them as "still improving?", not as candidates.
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=400, peak_lr=2.5e-5, decay_steps=10_000, decay_lr=2.5e-6
+        ),
+        num_train_steps=10_000,
+        batch_size=16,
+        log_interval=25,
+        # Checkpoint every 2k -> 5 checkpoints (2k/4k/6k/8k/10k = 1.7/3.5/5.2/6.9/8.7 epochs),
+        # ~8.9 GB each, so eval can pick the best by hardware rollout rather than by loss.
+        # keep_period must match save_interval or the manager prunes the ones you wanted.
+        save_interval=2_000,
+        keep_period=2_000,
+        num_workers=4,
+        # Expert-only: freeze the SigLIP tower (".*img.*") and Gemma-2B (".*llm.*" minus the action
+        # expert ".*llm.*_1.*"), so only the ~430M action expert trains. Same filter as
+        # pi05_piperx_rubiks_expert / pi05_piperx_fixedpose_expert.
+        freeze_filter=nnx.Any(
+            nnx.All(
+                nnx_utils.PathRegex(".*llm.*"),
+                nnx.Not(nnx_utils.PathRegex(".*llm.*_1.*")),  # action expert trains fully
+                nnx.Not(nnx_utils.PathRegex(".*lora.*")),     # LoRA adapters train
+            ),
+            nnx_utils.PathRegex(".*img.*"),  # SigLIP frozen
+        ),
+        # EMA OFF. At 0.99 (changan's expert-config default) train.py:113 keeps a full shadow copy
+        # of all 3.353B params, which OOM-killed the host at step 194/200: anon-rss 23.2 GB +
+        # shmem 4.3 GB = 27.5 GB of this box's 30 GB, no swap. The LoRA smoke with ema_decay=None
+        # completed the same 200 steps and wrote a checkpoint. Costs a modest final-quality bump;
+        # the openpi LoRA configs disable it for the same reason.
+        ema_decay=None,
+    ),
     TrainConfig(
         # Recommended run for the current 10-episode / 1.4k-frame piperx_rubiks_cube_bowl set: full fine-tune from pi05_base
         # with a short schedule (3k steps ~ 70 epochs at batch 32), warmup and cosine decay compressed to the run length,
