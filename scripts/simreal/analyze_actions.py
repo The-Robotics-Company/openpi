@@ -49,9 +49,16 @@ def main() -> None:
                "at or BELOW the model's own sampling noise -- not a meaningful gap")
     print(f"  -> {verdict}")
 
-    g, gf = df["dact_grip_mean_m"], df["floor_grip_mean_m"]
-    print(f"\n  gripper real vs sim mean {1000 * g.mean():.3f} mm   floor {1000 * gf.mean():.3f} mm"
+    g, gf = df["dact_grip_mean_mm"], df["floor_grip_mean_mm"]
+    print(f"\n  gripper real vs sim mean {g.mean():.2f} mm   floor {gf.mean():.2f} mm"
           f"   ratio {g.mean() / max(gf.mean(), 1e-9):.2f}x")
+
+    if "dcmd_arm_mean_rad" in df:
+        cmd = df["dcmd_arm_mean_rad"]
+        print(f"\n  The rows above are the model's raw DELTA output. What the arm would")
+        print(f"  actually be commanded is delta + state, and the state differs too:")
+        print(f"    commanded arm     mean {cmd.mean():.5f} rad ({cmd.mean() * RAD2DEG:.3f} deg)"
+              f"   max {df['dcmd_arm_max_rad'].max():.5f}")
 
     line("2. VELOCITY SENSITIVITY ||dv||  (label pinned to real)")
     print(f"\n  mean {df['dv_mean'].mean():.5f}   p95 {df['dv_mean'].quantile(0.95):.5f}   max {df['dv_max'].max():.5f}")

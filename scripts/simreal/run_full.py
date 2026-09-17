@@ -46,6 +46,9 @@ from paired_loader import PairedFrames, denormalize
 PI05_BASE = "/home/ubuntu/training/models/openpi-assets/checkpoints/pi05_base/params"
 SEED = 0
 CAMERAS = ("base_0_rgb", "left_wrist_0_rgb")
+# The gripper channel is RoboLab 0 (open) .. 1 (closed) over 0.07 m of jaw travel,
+# so a delta in those units becomes millimetres by multiplying by 70.
+GRIP_TO_MM = 0.07 * 1000.0
 
 
 def frame_rngs(indices, action_shape, *, offset=0):
@@ -149,6 +152,20 @@ def main() -> None:
         a_s = denormalize(sample(model, s_obs, samp_noise), a_stats, use_quantiles=pf.use_quantile_norm)
         d_act = np.abs(a_r - a_s)
 
+        # The sampler emits DELTA actions for the arm. d_act is therefore the difference
+        # in raw model output; what the arm would actually be commanded is delta + state,
+        # and the state differs between the domains too. Both are worth reporting.
+        s_stats = pf.norm_stats["state"]
+        st_r = denormalize(r_obs.state, s_stats, use_quantiles=pf.use_quantile_norm)
+        st_s = denormalize(s_obs.state, s_stats, use_quantiles=pf.use_quantile_norm)
+
+        def commanded(delta, state):
+            out = np.array(delta[..., :7], dtype=np.float64)
+            out[..., :6] += np.asarray(state)[..., None, :6]
+            return out
+
+        d_cmd = np.abs(commanded(a_r, st_r) - commanded(a_s, st_s))
+
         # Noise floor: the SAME real observation, different initial noise. This is the
         # yardstick every other delta has to beat to mean anything.
         noise2, _ = frame_rngs(idx, np.asarray(r_act).shape[1:], offset=1)
@@ -168,9 +185,11 @@ def main() -> None:
             "dv_max": dv.max(-1),
             "dact_arm_mean_rad": d_act[..., :6].mean((1, 2)),
             "dact_arm_max_rad": d_act[..., :6].max((1, 2)),
-            "dact_grip_mean_m": d_act[..., 6].mean(-1),
+            "dact_grip_mean_mm": d_act[..., 6].mean(-1) * GRIP_TO_MM,
+            "dcmd_arm_mean_rad": d_cmd[..., :6].mean((1, 2)),
+            "dcmd_arm_max_rad": d_cmd[..., :6].max((1, 2)),
             "floor_arm_mean_rad": d_floor[..., :6].mean((1, 2)),
-            "floor_grip_mean_m": d_floor[..., 6].mean(-1),
+            "floor_grip_mean_mm": d_floor[..., 6].mean(-1) * GRIP_TO_MM,
         }
 
         if args.ablations:
