@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import gc
 import json
 import pathlib
 import sys
@@ -34,6 +35,7 @@ import numpy as np
 
 import pairs
 from openpi.models import model as _model
+from openpi.shared import nnx_utils
 
 TOKENS = pathlib.Path("/home/ubuntu/training/tokens")
 DEPLOY_CKPT = "/home/ubuntu/training/runs/pi05_piperx_sim_expert/pi0.5-ft01-simdata/9999"
@@ -79,6 +81,20 @@ def swap_images(target_obs, source_obs):
     return dataclasses.replace(target_obs, images=dict(source_obs.images))
 
 
+def to_jax(obs):
+    """The loader hands back numpy; the model's type contract wants jax arrays."""
+    return dataclasses.replace(
+        obs,
+        images={k: jnp.asarray(v) for k, v in obs.images.items()},
+        image_masks={k: jnp.asarray(v) for k, v in obs.image_masks.items()},
+        state=jnp.asarray(obs.state),
+        tokenized_prompt=None if obs.tokenized_prompt is None else jnp.asarray(obs.tokenized_prompt, jnp.int32),
+        tokenized_prompt_mask=None
+        if obs.tokenized_prompt_mask is None
+        else jnp.asarray(obs.tokenized_prompt_mask),
+    )
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--k", type=int, required=True)
@@ -106,15 +122,19 @@ def main() -> None:
         """conditions: name -> fn(real_obs, sim_obs) -> Observation."""
         out = {name: [] for name in conditions}
         key = jax.random.key(args.seed)
+        # The same wrapper the policy server uses. Calling sample_actions directly runs the 3.3B
+        # model eagerly, op by op, at ~14 s per batch; this also makes the numbers here come from
+        # the exact code path that serves the robot.
+        sample = nnx_utils.module_jit(model.sample_actions)
         for i, (idx, batch) in enumerate(
             pairs.batches(pf, frames, batch_size=args.batch_size, num_workers=6)
         ):
             real_obs, _ = batch["real"]
             sim_obs, _ = batch["sim"]
             for name, fn in conditions.items():
-                obs = fn(real_obs, sim_obs)
+                obs = to_jax(fn(real_obs, sim_obs))
                 # Same noise draw for every condition, so differences are the observation alone.
-                actions = model.sample_actions(key, obs, num_steps=args.num_steps)
+                actions = sample(key, obs, num_steps=args.num_steps)
                 out[name].append(np.asarray(actions, np.float32))
             if i % 10 == 0:
                 print(f"  batch {i} ({(i + 1) * args.batch_size}/{len(frames)})", flush=True)
@@ -124,21 +144,31 @@ def main() -> None:
         "sim": lambda r, s: s,
         "real": lambda r, s: r,
         "simstate+realimg": lambda r, s: swap_images(s, r),
+        # The complement: real state with the twin's pixels. Tokens cannot touch the state channel,
+        # so this is the part of the gap that is out of reach by construction, and having both
+        # halves lets the total be decomposed instead of guessed at.
+        "realstate+simimg": lambda r, s: swap_images(r, s),
     }
     token_conditions = {
         "real+tokens": lambda r, s: r,
         "simstate+realimg+tokens": lambda r, s: swap_images(s, r),
     }
 
-    print("loading untreated policy ...", flush=True)
-    results = collect(build_model(0, None), plain_conditions)
+    def run_stage(label, k, tok, conditions):
+        """One policy, then let go of it: three 3.3B models resident at once is needless pressure."""
+        print(f"loading policy: {label} ...", flush=True)
+        model = build_model(k, tok)
+        try:
+            return collect(model, conditions)
+        finally:
+            del model
+            gc.collect()
+            jax.clear_caches()
 
-    print(f"loading policy with K={args.k} learned tokens ...", flush=True)
-    results.update(collect(build_model(args.k, tokens), token_conditions))
-
-    print(f"loading policy with K={args.k} RANDOM tokens ...", flush=True)
+    results = run_stage("untreated", 0, None, plain_conditions)
+    results.update(run_stage(f"K={args.k} learned tokens", args.k, tokens, token_conditions))
     results.update(
-        {"real+random": collect(build_model(args.k, random_tokens), {"real+random": lambda r, s: r})["real+random"]}
+        run_stage(f"K={args.k} RANDOM tokens", args.k, random_tokens, {"real+random": lambda r, s: r})
     )
 
     ref = results["sim"]

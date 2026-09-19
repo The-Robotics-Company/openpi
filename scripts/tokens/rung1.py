@@ -75,16 +75,24 @@ def encode_frames(module, weights, tok, images, frames, batch_size, prompt_index
     return out
 
 
-def probe_accuracy(real, sim, episodes, seed=0, steps=400, l2=1e-3):
+def probe_accuracy(real, sim, episodes, seed=0, steps=600):
     """Linear probe, sim vs real, on mean-pooled patch features.
 
-    Plain logistic regression trained with Adam -- a dependency-free stand-in for sklearn, which
-    is not in this environment. The split is by EPISODE, not by frame: adjacent frames at 30 Hz are
-    near-duplicates and a frame-level split would let the probe memorise rather than generalise.
+    Plain logistic regression trained with Adam -- a dependency-free stand-in for sklearn, which is
+    not in this environment. Two things matter for this to mean anything:
 
-    Chance is 0.5 by construction (one sim frame per real frame). An accuracy that falls toward
-    0.5 means the domains have stopped being linearly separable.
+      * The split is by EPISODE. Adjacent frames at 30 Hz are near-duplicates, so a frame-level
+        split would let the probe memorise rather than generalise.
+      * The L2 penalty is swept and the BEST test accuracy is reported. Mean-pooled features are
+        2048-dimensional against a few thousand samples, so a weakly-regularised probe separates
+        anything and a single fixed penalty would measure the probe, not the features. Taking the
+        probe's best shot is the conservative choice: it is the hardest test for the claim that the
+        domains have become less separable.
+
+    Chance is 0.5 by construction -- one sim frame per real frame.
     """
+    import optax
+
     eps = np.unique(episodes)
     rng = np.random.default_rng(seed)
     test_eps = set(rng.choice(eps, size=max(1, len(eps) // 2), replace=False).tolist())
@@ -98,28 +106,33 @@ def probe_accuracy(real, sim, episodes, seed=0, steps=400, l2=1e-3):
     xtr, xte = jnp.asarray((x[~m] - mu) / sd), jnp.asarray((x[m] - mu) / sd)
     ytr, yte = jnp.asarray(y[~m]), jnp.asarray(y[m])
 
-    def loss(p):
-        logits = xtr @ p["w"] + p["b"]
-        bce = jnp.mean(jnp.logaddexp(0.0, logits) - ytr * logits)
-        return bce + l2 * jnp.sum(p["w"] ** 2)
+    def fit(l2):
+        def loss(p):
+            logits = xtr @ p["w"] + p["b"]
+            return jnp.mean(jnp.logaddexp(0.0, logits) - ytr * logits) + l2 * jnp.sum(p["w"] ** 2)
 
-    import optax
+        params = {"w": jnp.zeros(xtr.shape[1]), "b": jnp.zeros(())}
+        opt = optax.adam(1e-2)
+        state = opt.init(params)
 
-    params = {"w": jnp.zeros(xtr.shape[1]), "b": jnp.zeros(())}
-    opt = optax.adam(1e-2)
-    state = opt.init(params)
+        @jax.jit
+        def step(p, st):
+            g = jax.grad(loss)(p)
+            u, st = opt.update(g, st, p)
+            return optax.apply_updates(p, u), st
 
-    @jax.jit
-    def step(p, st):
-        g = jax.grad(loss)(p)
-        u, st = opt.update(g, st, p)
-        return optax.apply_updates(p, u), st
+        for _ in range(steps):
+            params, state = step(params, state)
+        train_acc = float(jnp.mean(((xtr @ params["w"] + params["b"] > 0) == (ytr > 0.5)).astype(jnp.float32)))
+        test_acc = float(jnp.mean(((xte @ params["w"] + params["b"] > 0) == (yte > 0.5)).astype(jnp.float32)))
+        return train_acc, test_acc
 
-    for _ in range(steps):
-        params, state = step(params, state)
-
-    pred = (xte @ params["w"] + params["b"]) > 0
-    return float(jnp.mean((pred == (yte > 0.5)).astype(jnp.float32)))
+    results = {}
+    for l2 in (1e-4, 1e-3, 1e-2, 1e-1, 1.0):
+        tr, te = fit(l2)
+        results[f"l2={l2:g}"] = {"train": tr, "test": te}
+    best = max(results.values(), key=lambda r: r["test"])
+    return {"best_test_acc": best["test"], "n_train": int((~m).sum()), "n_test": int(m.sum()), "by_l2": results}
 
 
 def main() -> None:
@@ -174,15 +187,34 @@ def main() -> None:
                 "ratio_content": float(d_sr[:, CONTENT].mean() / d_rr[:, CONTENT].mean()),
             }
 
+        # How far could ANY image-independent correction get? The tokens apply one shared
+        # modulation to every frame, so their reachable ceiling is a constant offset in feature
+        # space. Subtracting the optimal such offset -- fitted on these very frames, hence an
+        # oracle no real method could match -- bounds what this design can possibly achieve, and
+        # separates "the tokens underfit" from "the residual gap is not constant, so no shared
+        # correction can remove it" (the escalate-to-VPT-deep branch).
+        off_global = (base.astype(np.float32).mean((0, 1)) - z_sim.astype(np.float32).mean((0, 1)))
+        off_patch = (base.astype(np.float32).mean(0) - z_sim.astype(np.float32).mean(0))
+        d_sr_oracle_global = cosine_distance(base.astype(np.float32) - off_global, z_sim)
+        d_sr_oracle_patch = cosine_distance(base.astype(np.float32) - off_patch, z_sim)
+
         entry = {
             "d_rr_all": float(d_rr.mean()),
             "d_rr_content": float(d_rr[:, CONTENT].mean()),
             "no_tokens": summarize(d_sr_base),
+            "oracle_constant_offset": summarize(d_sr_oracle_global),
+            "oracle_per_patch_offset": summarize(d_sr_oracle_patch),
             "runs": {},
         }
-        entry["no_tokens"]["probe_acc"] = probe_accuracy(base, z_sim, episodes)
+        print(f"[{cam}] ORACLE constant offset   ratio_content {entry['oracle_constant_offset']['ratio_content']:.3f}  "
+              f"d_sr {entry['oracle_constant_offset']['d_sr_content']:.4f}", flush=True)
+        print(f"[{cam}] ORACLE per-patch offset  ratio_content {entry['oracle_per_patch_offset']['ratio_content']:.3f}  "
+              f"d_sr {entry['oracle_per_patch_offset']['d_sr_content']:.4f}", flush=True)
+        del d_sr_oracle_global, d_sr_oracle_patch, off_global, off_patch
+        entry["no_tokens"]["probe"] = probe_accuracy(base, z_sim, episodes)
         print(f"\n[{cam}] NO TOKENS  ratio_content {entry['no_tokens']['ratio_content']:.3f}  "
-              f"probe {entry['no_tokens']['probe_acc']:.3f}", flush=True)
+              f"d_sr {entry['no_tokens']['d_sr_content']:.4f}  "
+              f"probe {entry['no_tokens']['probe']['best_test_acc']:.3f}", flush=True)
         del ctrl_feats
 
         for d in cam_runs:
@@ -191,7 +223,7 @@ def main() -> None:
             mod_k = modules.setdefault(meta["num_tokens"], _tt.make_module(meta["num_tokens"]))
             feats = encode_frames(mod_k, weights, jnp.asarray(tok), imgs, frames, args.batch_size, 0)
             r = summarize(cosine_distance(feats, z_sim))
-            r["probe_acc"] = probe_accuracy(feats, z_sim, episodes)
+            r["probe"] = probe_accuracy(feats, z_sim, episodes)
             r["gap_closed_pct"] = 100.0 * (1.0 - (r["ratio_content"] - 1.0) /
                                            max(entry["no_tokens"]["ratio_content"] - 1.0, 1e-9))
             r["num_tokens"] = meta["num_tokens"]
@@ -199,7 +231,8 @@ def main() -> None:
             r["shuffled_control"] = meta["shuffled_control"]
             entry["runs"][d.name] = r
             print(f"[{cam}] {d.name:32s} ratio_content {r['ratio_content']:.3f}  "
-                  f"probe {r['probe_acc']:.3f}  gap closed {r['gap_closed_pct']:+.1f}%", flush=True)
+                  f"d_sr {r['d_sr_content']:.4f}  probe {r['probe']['best_test_acc']:.3f}  "
+                  f"gap closed {r['gap_closed_pct']:+.1f}%", flush=True)
             del feats
 
         report["cameras"][cam] = entry
