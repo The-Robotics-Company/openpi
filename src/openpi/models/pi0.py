@@ -78,6 +78,7 @@ class Pi0(_model.BaseModel):
             )
         )
         llm.lazy_init(rngs=rngs, method="init", use_adarms=[False, True] if config.pi05 else [False, False])
+        self.prompt_token_cameras = tuple(config.prompt_token_cameras)
         img = nnx_bridge.ToNNX(
             _siglip.Module(
                 num_classes=paligemma_config.width,
@@ -85,6 +86,8 @@ class Pi0(_model.BaseModel):
                 pool_type="none",
                 scan=True,
                 dtype_mm=config.dtype,
+                num_prompt_tokens=config.num_prompt_tokens,
+                num_prompt_sets=len(config.prompt_token_cameras) or 1,
             )
         )
         img.lazy_init(next(iter(config.fake_obs().images.values())), train=False, rngs=rngs)
@@ -111,7 +114,11 @@ class Pi0(_model.BaseModel):
         tokens = []
         # embed images
         for name in obs.images:
-            image_tokens, _ = self.PaliGemma.img(obs.images[name], train=False)
+            # Select this camera's token set by name, never by iteration order: `inputs_spec`
+            # declares three cameras while this robot supplies two, so a positional index would
+            # quietly hand the wrist tokens to the wrong view.
+            prompt_index = self.prompt_token_cameras.index(name) if name in self.prompt_token_cameras else None
+            image_tokens, _ = self.PaliGemma.img(obs.images[name], train=False, prompt_index=prompt_index)
 
             tokens.append(image_tokens)
             input_mask.append(

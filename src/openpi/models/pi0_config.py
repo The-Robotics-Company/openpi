@@ -32,6 +32,17 @@ class Pi0Config(_model.BaseModelConfig):
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
 
+    # Learnable visual prompt tokens (VPT-shallow) inside the frozen SigLIP tower: this many
+    # vectors of the patch-embedding width are prepended to the patch sequence after the position
+    # embedding, and stripped off again the moment the ViT returns, so the sequence length reaching
+    # Gemma is unchanged. Zero -- the default -- never creates the parameter at all, leaving the
+    # graph byte-identical to a checkpoint trained without it.
+    num_prompt_tokens: int = 0
+    # One independent token set is allocated per entry, in this order. The appearance gap differs
+    # between an external and a wrist view, so they get separate corrections. A camera absent from
+    # this tuple is encoded with no tokens rather than borrowing another camera's.
+    prompt_token_cameras: tuple[str, ...] = ()
+
     pytorch_compile_mode: str | None = "max-autotune"
 
     def __post_init__(self):
@@ -46,6 +57,15 @@ class Pi0Config(_model.BaseModelConfig):
                 "max-autotune",
                 "max-autotune-no-cudagraphs",
             ]
+        # Either both are set or neither is. Tokens with no cameras would allocate a parameter that
+        # nothing can reach; cameras with no tokens would silently do nothing at all.
+        if (self.num_prompt_tokens > 0) != bool(self.prompt_token_cameras):
+            raise ValueError(
+                "num_prompt_tokens and prompt_token_cameras must be set together, got "
+                f"num_prompt_tokens={self.num_prompt_tokens}, prompt_token_cameras={self.prompt_token_cameras}"
+            )
+        if len(set(self.prompt_token_cameras)) != len(self.prompt_token_cameras):
+            raise ValueError(f"prompt_token_cameras must be unique, got {self.prompt_token_cameras}")
 
     @property
     @override

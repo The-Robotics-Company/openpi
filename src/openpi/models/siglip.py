@@ -203,9 +203,14 @@ class _Module(nn.Module):
     # or "dots_with_no_batch_dims_saveable" for more speed (memory costly)
     remat_policy: str = "nothing_saveable"
     dtype_mm: str = "float32"
+    # Learnable visual prompt tokens (VPT-shallow); see Pi0Config for the rationale. Zero disables
+    # them entirely -- no parameter is created and the forward pass is unchanged.
+    num_prompt_tokens: int = 0
+    # How many independent token sets to allocate, selected per call by `prompt_index`.
+    num_prompt_sets: int = 1
 
     @nn.compact
-    def __call__(self, image, *, train=False):
+    def __call__(self, image, *, train=False, prompt_index=None):
         out = {}
 
         # Kevin edit: do patch extraction and posemb in float32,
@@ -232,6 +237,23 @@ class _Module(nn.Module):
             cls = self.param("cls", nn.initializers.zeros, (1, 1, c), x.dtype)
             x = jnp.concatenate([jnp.tile(cls, [n, 1, 1]), x], axis=1)
 
+        # Prompt tokens go in front of everything else and come back off in a single slice right
+        # after the transformer, so every pool_type below still sees exactly the sequence it
+        # expects. The parameter is created whenever the tower is configured for tokens -- even on
+        # a call that does not use them -- because Flax only materialises a param on the call that
+        # asks for it, and lazy_init has to see all of them.
+        num_prompt = 0
+        if self.num_prompt_tokens:
+            prompt_tokens = self.param(
+                "prompt_tokens",
+                nn.initializers.normal(stddev=0.02),
+                (self.num_prompt_sets, self.num_prompt_tokens, c),
+                jnp.float32,
+            )
+            if prompt_index is not None:
+                num_prompt = self.num_prompt_tokens
+                x = jnp.concatenate([jnp.tile(prompt_tokens[prompt_index][None], [n, 1, 1]), x], axis=1)
+
         n, _, c = x.shape  # n,l,d
         x = nn.Dropout(rate=self.dropout)(x, not train)
 
@@ -248,6 +270,12 @@ class _Module(nn.Module):
             dtype_mm=self.dtype_mm,
             name="Transformer",
         )(x, deterministic=not train)
+
+        # The prompt tokens have already done their work: they modulated every patch through
+        # self-attention at every layer, and that modulation is baked into the patch features.
+        # Their own outputs carry nothing downstream needs, so they are dropped here.
+        if num_prompt:
+            x = x[:, num_prompt:]
         encoded = out["encoded"] = x
 
         if self.pool_type == "map":
